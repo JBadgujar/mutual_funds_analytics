@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_analytics_snapshot_window_drawdown_rank;
+DROP INDEX IF EXISTS idx_analytics_snapshot_window_median_rank;

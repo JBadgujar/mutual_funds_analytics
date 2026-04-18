@@ -60,6 +60,26 @@ type AnalyticsSnapshot struct {
 	UpdatedAt             time.Time
 }
 
+type RankQuery struct {
+	Category   string
+	WindowCode string
+	SortBy     string
+	Limit      int32
+	Offset     int32
+}
+
+type RankedFund struct {
+	FundID                int64
+	SchemeCode            string
+	FundName              string
+	Category              string
+	WindowCode            string
+	RollingReturnMedian   float64
+	MaxDrawdownDeclinePct float64
+	CurrentNAV            *float64
+	LastUpdated           time.Time
+}
+
 type SyncRun struct {
 	ID               int64
 	StartedAt        time.Time

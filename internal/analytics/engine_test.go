@@ -145,9 +145,16 @@ func TestEngine_RecomputeAll_PersistsSnapshotRows(t *testing.T) {
 	}
 
 	engine := NewEngine(funds, navs, analyticsRepo)
+	invalidationTriggered := false
+	engine.SetOnSuccessfulRecompute(func() {
+		invalidationTriggered = true
+	})
 	result, err := engine.RecomputeAll(ctx)
 	if err != nil {
 		t.Fatalf("recompute all: %v", err)
+	}
+	if !invalidationTriggered {
+		t.Fatal("expected successful recompute callback to be triggered")
 	}
 
 	if result.FundsProcessed != 1 {

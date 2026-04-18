@@ -509,6 +509,81 @@ func (r *PostgresAnalyticsRepository) ListByWindow(ctx context.Context, windowCo
 	return out, nil
 }
 
+func (r *PostgresAnalyticsRepository) ListRanked(ctx context.Context, query domain.RankQuery) ([]domain.RankedFund, int64, error) {
+	if query.Limit <= 0 {
+		query.Limit = 10
+	}
+
+	const countQuery = `
+		SELECT COUNT(1)
+		FROM analytics_snapshot a
+		JOIN funds f ON f.id = a.fund_id
+		WHERE f.active = TRUE
+		  AND a.window_code = $1
+		  AND a.insufficient_data = FALSE
+		  AND ($2 = '' OR f.category = $2)
+	`
+
+	var total int64
+	if err := r.db.QueryRow(ctx, countQuery, query.WindowCode, query.Category).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count ranked funds: %w", err)
+	}
+
+	orderBy := "a.rolling_return_median DESC"
+	if query.SortBy == "max_drawdown" {
+		orderBy = "a.max_drawdown_decline_pct ASC"
+	}
+
+	listQuery := fmt.Sprintf(`
+		SELECT
+			a.fund_id,
+			f.scheme_code,
+			f.name,
+			f.category,
+			a.window_code,
+			a.rolling_return_median,
+			a.max_drawdown_decline_pct,
+			n.nav,
+			GREATEST(a.updated_at, f.updated_at, COALESCE(n.updated_at, a.updated_at)) AS last_updated
+		FROM analytics_snapshot a
+		JOIN funds f ON f.id = a.fund_id
+		LEFT JOIN LATERAL (
+			SELECT nav, updated_at
+			FROM nav_history nh
+			WHERE nh.fund_id = f.id
+			ORDER BY nh.nav_date DESC
+			LIMIT 1
+		) n ON TRUE
+		WHERE f.active = TRUE
+		  AND a.window_code = $1
+		  AND a.insufficient_data = FALSE
+		  AND ($2 = '' OR f.category = $2)
+		ORDER BY %s, a.fund_id ASC
+		LIMIT $3 OFFSET $4
+	`, orderBy)
+
+	rows, err := r.db.Query(ctx, listQuery, query.WindowCode, query.Category, query.Limit, query.Offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query ranked funds: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.RankedFund, 0, query.Limit)
+	for rows.Next() {
+		item, scanErr := scanRankedFund(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		out = append(out, item)
+	}
+
+	if rows.Err() != nil {
+		return nil, 0, fmt.Errorf("iterate ranked funds: %w", rows.Err())
+	}
+
+	return out, total, nil
+}
+
 func (r *PostgresSyncRepository) StartRun(ctx context.Context, triggeredBy string) (domain.SyncRun, error) {
 	const q = `
 		INSERT INTO sync_runs (status, triggered_by)
@@ -815,6 +890,32 @@ func scanAnalyticsSnapshot(row interface{ Scan(dest ...any) error }) (domain.Ana
 	if troughDate.Valid {
 		value := troughDate.Time
 		out.MaxDrawdownTroughDate = &value
+	}
+
+	return out, nil
+}
+
+func scanRankedFund(row interface{ Scan(dest ...any) error }) (domain.RankedFund, error) {
+	var out domain.RankedFund
+	var currentNAV sql.NullFloat64
+
+	if err := row.Scan(
+		&out.FundID,
+		&out.SchemeCode,
+		&out.FundName,
+		&out.Category,
+		&out.WindowCode,
+		&out.RollingReturnMedian,
+		&out.MaxDrawdownDeclinePct,
+		&currentNAV,
+		&out.LastUpdated,
+	); err != nil {
+		return domain.RankedFund{}, fmt.Errorf("scan ranked fund: %w", err)
+	}
+
+	if currentNAV.Valid {
+		value := currentNAV.Float64
+		out.CurrentNAV = &value
 	}
 
 	return out, nil

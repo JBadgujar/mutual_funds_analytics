@@ -35,6 +35,7 @@ type Engine struct {
 	analytics domain.AnalyticsRepository
 	nowFn     func() time.Time
 	windows   []WindowSpec
+	onSuccess func()
 }
 
 type PrecomputeResult struct {
@@ -51,6 +52,10 @@ func NewEngine(funds domain.FundRepository, navs domain.NavRepository, analytics
 		nowFn:     time.Now,
 		windows:   append([]WindowSpec(nil), DefaultWindows...),
 	}
+}
+
+func (e *Engine) SetOnSuccessfulRecompute(fn func()) {
+	e.onSuccess = fn
 }
 
 func (e *Engine) RecomputeAll(ctx context.Context) (PrecomputeResult, error) {
@@ -85,6 +90,10 @@ func (e *Engine) RecomputeAll(ctx context.Context) (PrecomputeResult, error) {
 		}
 
 		result.FundsProcessed++
+	}
+
+	if e.onSuccess != nil {
+		e.onSuccess()
 	}
 
 	return result, nil

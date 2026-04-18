@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mutual-fund-analytics/internal/domain"
@@ -49,6 +51,7 @@ var allowedCategories = map[string]struct{}{
 type API struct {
 	funds     domain.FundRepository
 	analytics domain.AnalyticsRepository
+	rankCache *rankingCache
 }
 
 type FundsQuery struct {
@@ -60,7 +63,95 @@ type FundsQuery struct {
 }
 
 func NewAPI(funds domain.FundRepository, analytics domain.AnalyticsRepository) *API {
-	return &API{funds: funds, analytics: analytics}
+	return &API{
+		funds:     funds,
+		analytics: analytics,
+		rankCache: newRankingCache(60 * time.Second),
+	}
+}
+
+type RankQuery struct {
+	Category string
+	Window   string
+	SortBy   string
+	Limit    int32
+	Offset   int32
+}
+
+func (a *API) HandleRankFunds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	query, err := parseRankQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		return
+	}
+
+	cacheKey := rankCacheKey(query)
+	if cachedPayload, ok := a.rankCache.Get(cacheKey, time.Now().UTC()); ok {
+		writeJSONBytes(w, http.StatusOK, cachedPayload)
+		return
+	}
+
+	rows, total, err := a.analytics.ListRanked(r.Context(), domain.RankQuery{
+		Category:   query.Category,
+		WindowCode: query.Window,
+		SortBy:     query.SortBy,
+		Limit:      query.Limit,
+		Offset:     query.Offset,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to rank funds")
+		return
+	}
+
+	if total == 0 {
+		writeError(w, http.StatusNotFound, "not_found", "no ranked funds found")
+		return
+	}
+
+	medianKey := fmt.Sprintf("median_return_%s", strings.ToLower(query.Window))
+	drawdownKey := fmt.Sprintf("max_drawdown_%s", strings.ToLower(query.Window))
+
+	items := make([]map[string]any, 0, len(rows))
+	for i, row := range rows {
+		item := map[string]any{
+			"rank":         int(query.Offset) + i + 1,
+			"fund_code":    row.SchemeCode,
+			"fund_name":    row.FundName,
+			"amc":          deriveAMCFromName(row.FundName),
+			"current_nav":  row.CurrentNAV,
+			"last_updated": row.LastUpdated.UTC().Format("2006-01-02"),
+		}
+		item[medianKey] = row.RollingReturnMedian
+		item[drawdownKey] = row.MaxDrawdownDeclinePct
+		items = append(items, item)
+	}
+
+	response := map[string]any{
+		"category":    query.Category,
+		"window":      query.Window,
+		"sorted_by":   query.SortBy,
+		"total_funds": total,
+		"showing":     len(items),
+		"funds":       items,
+	}
+
+	payload, err := json.Marshal(response)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to encode rank response")
+		return
+	}
+
+	a.rankCache.Set(cacheKey, payload, time.Now().UTC())
+	writeJSONBytes(w, http.StatusOK, payload)
+}
+
+func (a *API) InvalidateRankingCache() {
+	a.rankCache.Invalidate()
 }
 
 func (a *API) HandleListFunds(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +361,59 @@ func parseFundsQuery(r *http.Request) (FundsQuery, error) {
 	}, nil
 }
 
+func parseRankQuery(r *http.Request) (RankQuery, error) {
+	query := r.URL.Query()
+
+	category := strings.TrimSpace(query.Get("category"))
+	if category != "" {
+		if _, ok := allowedCategories[category]; !ok {
+			return RankQuery{}, fmt.Errorf("category must be Mid Cap Direct Growth or Small Cap Direct Growth")
+		}
+	}
+
+	window := strings.ToUpper(strings.TrimSpace(query.Get("window")))
+	if window == "" {
+		window = "3Y"
+	}
+	if _, ok := allowedWindows[window]; !ok {
+		return RankQuery{}, fmt.Errorf("window must be one of 1Y,3Y,5Y,10Y")
+	}
+
+	sortBy := strings.TrimSpace(query.Get("sort_by"))
+	if sortBy == "" {
+		sortBy = "median_return"
+	}
+	if sortBy != "median_return" && sortBy != "max_drawdown" {
+		return RankQuery{}, fmt.Errorf("sort_by must be median_return or max_drawdown")
+	}
+
+	limit := int32(10)
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			return RankQuery{}, fmt.Errorf("limit must be an integer between 1 and 100")
+		}
+		limit = int32(parsed)
+	}
+
+	offset := int32(0)
+	if rawOffset := strings.TrimSpace(query.Get("offset")); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			return RankQuery{}, fmt.Errorf("offset must be a non-negative integer")
+		}
+		offset = int32(parsed)
+	}
+
+	return RankQuery{
+		Category: category,
+		Window:   window,
+		SortBy:   sortBy,
+		Limit:    limit,
+		Offset:   offset,
+	}, nil
+}
+
 func parseFundCodeFromPath(path string) (string, error) {
 	trimmed := strings.Trim(path, "/")
 	parts := strings.Split(trimmed, "/")
@@ -365,4 +509,83 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func writeJSONBytes(w http.ResponseWriter, statusCode int, payload []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(payload)
+}
+
+type rankingCache struct {
+	mu      sync.RWMutex
+	ttl     time.Duration
+	entries map[string]rankCacheEntry
+}
+
+type rankCacheEntry struct {
+	payload   []byte
+	expiresAt time.Time
+}
+
+func newRankingCache(ttl time.Duration) *rankingCache {
+	if ttl <= 0 {
+		ttl = 60 * time.Second
+	}
+
+	return &rankingCache{
+		ttl:     ttl,
+		entries: make(map[string]rankCacheEntry),
+	}
+}
+
+func (c *rankingCache) Get(key string, now time.Time) ([]byte, bool) {
+	c.mu.RLock()
+	entry, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+
+	if now.After(entry.expiresAt) {
+		c.mu.Lock()
+		delete(c.entries, key)
+		c.mu.Unlock()
+		return nil, false
+	}
+
+	payload := make([]byte, len(entry.payload))
+	copy(payload, entry.payload)
+	return payload, true
+}
+
+func (c *rankingCache) Set(key string, payload []byte, now time.Time) {
+	if len(payload) == 0 {
+		return
+	}
+
+	copied := make([]byte, len(payload))
+	copy(copied, payload)
+
+	c.mu.Lock()
+	c.entries[key] = rankCacheEntry{
+		payload:   copied,
+		expiresAt: now.Add(c.ttl),
+	}
+	c.mu.Unlock()
+}
+
+func (c *rankingCache) Invalidate() {
+	c.mu.Lock()
+	c.entries = make(map[string]rankCacheEntry)
+	c.mu.Unlock()
+}
+
+func rankCacheKey(query RankQuery) string {
+	category := query.Category
+	if category == "" {
+		category = "all"
+	}
+
+	return fmt.Sprintf("%s|%s|%s|%d|%d", category, query.Window, query.SortBy, query.Limit, query.Offset)
 }

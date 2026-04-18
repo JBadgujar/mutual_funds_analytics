@@ -11,13 +11,21 @@ import (
 	"syscall"
 	"time"
 
+	"mutual-fund-analytics/internal/analytics"
 	"mutual-fund-analytics/internal/config"
+	"mutual-fund-analytics/internal/domain"
 	httptransport "mutual-fund-analytics/internal/http"
+	"mutual-fund-analytics/internal/limiter"
+	"mutual-fund-analytics/internal/mfapi"
 	"mutual-fund-analytics/internal/storage"
+	"mutual-fund-analytics/internal/syncer"
 )
 
 func main() {
 	migrateOnly := flag.Bool("migrate-only", false, "run database migrations and exit")
+	recomputeAnalyticsOnly := flag.Bool("recompute-analytics-only", false, "recompute analytics snapshots and exit")
+	syncBackfillOnly := flag.Bool("sync-backfill-only", false, "discover tracked schemes and run backfill sync, then exit")
+	syncBackfillRecomputeOnly := flag.Bool("sync-backfill-recompute-only", false, "discover tracked schemes, run backfill sync, recompute analytics snapshots, then exit")
 	flag.Parse()
 
 	cfg := config.Load()
@@ -47,8 +55,75 @@ func main() {
 		return
 	}
 
+	oneShotModes := 0
+	if *recomputeAnalyticsOnly {
+		oneShotModes++
+	}
+	if *syncBackfillOnly {
+		oneShotModes++
+	}
+	if *syncBackfillRecomputeOnly {
+		oneShotModes++
+	}
+
+	if oneShotModes > 1 {
+		logger.Error("only one one-shot mode can be used at a time")
+		os.Exit(1)
+	}
+
 	fundRepo := storage.NewFundRepository(pool)
+	navRepo := storage.NewNavRepository(pool)
 	analyticsRepo := storage.NewAnalyticsRepository(pool)
+	syncRepo := storage.NewSyncRepository(pool)
+
+	if *recomputeAnalyticsOnly {
+		runAnalyticsRecompute(ctx, logger, fundRepo, navRepo, analyticsRepo)
+		return
+	}
+
+	if *syncBackfillOnly || *syncBackfillRecomputeOnly {
+		apiLimiter := limiter.NewPersistentLimiter(pool)
+		mfClient, err := mfapi.NewClient(nil, apiLimiter)
+		if err != nil {
+			logger.Error("failed to create mfapi client", "error", err)
+			os.Exit(1)
+		}
+
+		discovery := syncer.NewDiscoveryService(mfClient, fundRepo)
+		discoveryResult, err := discovery.DiscoverAndTrack(ctx)
+		if err != nil {
+			logger.Error("fund discovery failed", "error", err)
+			os.Exit(1)
+		}
+
+		logger.Info("fund discovery completed",
+			"total_discovered_schemes", discoveryResult.TotalDiscoveredSchemes,
+			"tracked_schemes", len(discoveryResult.TrackedSchemes),
+		)
+
+		orchestrator := syncer.NewOrchestrator(pool, fundRepo, navRepo, syncRepo, mfClient)
+		syncResult, err := orchestrator.RunBackfill(ctx, "manual-cli")
+		if err != nil {
+			logger.Error("backfill sync failed", "error", err)
+			os.Exit(1)
+		}
+
+		logger.Info("backfill sync completed",
+			"run_id", syncResult.RunID,
+			"status", syncResult.FinalStatus,
+			"total_funds", syncResult.TotalFunds,
+			"processed_funds", syncResult.ProcessedFunds,
+			"failed_funds", syncResult.FailedFunds,
+			"inserted_nav_rows", syncResult.InsertedNAVRows,
+		)
+
+		if *syncBackfillRecomputeOnly {
+			runAnalyticsRecompute(ctx, logger, fundRepo, navRepo, analyticsRepo)
+		}
+
+		return
+	}
+
 	api := httptransport.NewAPI(fundRepo, analyticsRepo)
 
 	server := &stdhttp.Server{
@@ -74,6 +149,21 @@ func main() {
 	}
 
 	logger.Info("server stopped")
+}
+
+func runAnalyticsRecompute(ctx context.Context, logger *slog.Logger, fundRepo domain.FundRepository, navRepo domain.NavRepository, analyticsRepo domain.AnalyticsRepository) {
+	engine := analytics.NewEngine(fundRepo, navRepo, analyticsRepo)
+	result, err := engine.RecomputeAll(ctx)
+	if err != nil {
+		logger.Error("analytics recompute failed", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info("analytics recompute completed",
+		"funds_processed", result.FundsProcessed,
+		"snapshots_generated", result.SnapshotsGenerated,
+		"insufficient_snapshots", result.InsufficientSnapshots,
+	)
 }
 
 func parseLogLevel(level string) slog.Level {

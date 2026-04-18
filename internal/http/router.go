@@ -11,6 +11,7 @@ func NewRouter(api *API) stdhttp.Handler {
 	mux.HandleFunc("/health", healthHandler)
 	if api != nil {
 		mux.HandleFunc("/funds", api.HandleListFunds)
+		mux.HandleFunc("/funds/rank", api.HandleRankFunds)
 		mux.HandleFunc("/funds/", func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 			path := strings.Trim(r.URL.Path, "/")
 			if strings.HasSuffix(path, "/analytics") {
