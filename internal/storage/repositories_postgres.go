@@ -426,17 +426,45 @@ func (r *PostgresSyncRepository) ListPendingFundStates(ctx context.Context, now 
 
 func (r *PostgresRateLimitStateRepository) Upsert(ctx context.Context, state domain.RateLimitState) error {
 	const q = `
-		INSERT INTO rate_limit_state (provider, window_start, window_seconds, request_count)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO rate_limit_state (
+			provider,
+			window_start,
+			window_seconds,
+			request_count,
+			second_bucket,
+			minute_bucket,
+			hour_bucket,
+			second_count,
+			minute_count,
+			hour_count
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (provider)
 		DO UPDATE SET
 			window_start = EXCLUDED.window_start,
 			window_seconds = EXCLUDED.window_seconds,
 			request_count = EXCLUDED.request_count,
+			second_bucket = EXCLUDED.second_bucket,
+			minute_bucket = EXCLUDED.minute_bucket,
+			hour_bucket = EXCLUDED.hour_bucket,
+			second_count = EXCLUDED.second_count,
+			minute_count = EXCLUDED.minute_count,
+			hour_count = EXCLUDED.hour_count,
 			updated_at = NOW()
 	`
 
-	_, err := r.db.Exec(ctx, q, state.Provider, state.WindowStart, state.WindowSeconds, state.RequestCount)
+	_, err := r.db.Exec(ctx, q,
+		state.Provider,
+		state.WindowStart,
+		state.WindowSeconds,
+		state.RequestCount,
+		state.SecondBucket,
+		state.MinuteBucket,
+		state.HourBucket,
+		state.SecondCount,
+		state.MinuteCount,
+		state.HourCount,
+	)
 	if err != nil {
 		return fmt.Errorf("upsert rate limit state: %w", err)
 	}
@@ -446,7 +474,18 @@ func (r *PostgresRateLimitStateRepository) Upsert(ctx context.Context, state dom
 
 func (r *PostgresRateLimitStateRepository) Get(ctx context.Context, provider string) (domain.RateLimitState, error) {
 	const q = `
-		SELECT provider, window_start, window_seconds, request_count, updated_at
+		SELECT
+			provider,
+			window_start,
+			window_seconds,
+			request_count,
+			second_bucket,
+			minute_bucket,
+			hour_bucket,
+			second_count,
+			minute_count,
+			hour_count,
+			updated_at
 		FROM rate_limit_state
 		WHERE provider = $1
 	`
@@ -582,6 +621,12 @@ func scanRateLimitState(row interface{ Scan(dest ...any) error }) (domain.RateLi
 		&out.WindowStart,
 		&out.WindowSeconds,
 		&out.RequestCount,
+		&out.SecondBucket,
+		&out.MinuteBucket,
+		&out.HourBucket,
+		&out.SecondCount,
+		&out.MinuteCount,
+		&out.HourCount,
 		&out.UpdatedAt,
 	); err != nil {
 		return domain.RateLimitState{}, fmt.Errorf("scan rate limit state: %w", err)
