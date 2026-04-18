@@ -23,16 +23,28 @@ type NAVHistory struct {
 }
 
 type AnalyticsSnapshot struct {
-	FundID       int64
-	AsOfDate     time.Time
-	Return1Y     float64
-	Return3Y     float64
-	Return5Y     float64
-	Volatility1Y float64
-	SharpeRatio  float64
-	ExpenseRatio float64
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	FundID                int64
+	WindowCode            string
+	AsOfDate              time.Time
+	StartDate             *time.Time
+	EndDate               *time.Time
+	TotalDays             int32
+	NAVDataPoints         int32
+	InsufficientData      bool
+	RollingReturnMin      float64
+	RollingReturnMax      float64
+	RollingReturnMedian   float64
+	RollingReturnP25      float64
+	RollingReturnP75      float64
+	MaxDrawdownDeclinePct float64
+	MaxDrawdownPeakDate   *time.Time
+	MaxDrawdownTroughDate *time.Time
+	CAGRMin               float64
+	CAGRMax               float64
+	CAGRMedian            float64
+	AnnualizedVolatility  float64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type SyncRun struct {

@@ -15,12 +15,13 @@ type NavRepository interface {
 	Upsert(ctx context.Context, nav NAVHistory) error
 	GetByDate(ctx context.Context, fundID int64, navDate time.Time) (NAVHistory, error)
 	GetLatestByFundID(ctx context.Context, fundID int64, limit int32) ([]NAVHistory, error)
+	ListByFundID(ctx context.Context, fundID int64) ([]NAVHistory, error)
 }
 
 type AnalyticsRepository interface {
 	Upsert(ctx context.Context, snapshot AnalyticsSnapshot) error
-	GetLatestForFund(ctx context.Context, fundID int64) (AnalyticsSnapshot, error)
-	TopByReturn1Y(ctx context.Context, asOfDate time.Time, limit int32) ([]AnalyticsSnapshot, error)
+	GetByFundAndWindow(ctx context.Context, fundID int64, windowCode string) (AnalyticsSnapshot, error)
+	ListByWindow(ctx context.Context, windowCode string, asOfDate time.Time, limit int32) ([]AnalyticsSnapshot, error)
 }
 
 type SyncRepository interface {

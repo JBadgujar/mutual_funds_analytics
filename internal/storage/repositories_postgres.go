@@ -193,39 +193,105 @@ func (r *PostgresNavRepository) GetLatestByFundID(ctx context.Context, fundID in
 	return out, nil
 }
 
+func (r *PostgresNavRepository) ListByFundID(ctx context.Context, fundID int64) ([]domain.NAVHistory, error) {
+	const q = `
+		SELECT fund_id, nav_date, nav, source, created_at, updated_at
+		FROM nav_history
+		WHERE fund_id = $1
+		ORDER BY nav_date ASC
+	`
+
+	rows, err := r.db.Query(ctx, q, fundID)
+	if err != nil {
+		return nil, fmt.Errorf("list nav history by fund id: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.NAVHistory, 0)
+	for rows.Next() {
+		nav, scanErr := scanNAVHistory(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, nav)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate nav history by fund id: %w", rows.Err())
+	}
+
+	return out, nil
+}
+
 func (r *PostgresAnalyticsRepository) Upsert(ctx context.Context, snapshot domain.AnalyticsSnapshot) error {
 	const q = `
 		INSERT INTO analytics_snapshot (
 			fund_id,
+			window_code,
 			as_of_date,
-			return_1y,
-			return_3y,
-			return_5y,
-			volatility_1y,
-			sharpe_ratio,
-			expense_ratio
+			start_date,
+			end_date,
+			total_days,
+			nav_data_points,
+			insufficient_data,
+			rolling_return_min,
+			rolling_return_max,
+			rolling_return_median,
+			rolling_return_p25,
+			rolling_return_p75,
+			max_drawdown_decline_pct,
+			max_drawdown_peak_date,
+			max_drawdown_trough_date,
+			cagr_min,
+			cagr_max,
+			cagr_median,
+			annualized_volatility
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (fund_id, as_of_date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		ON CONFLICT (fund_id, window_code)
 		DO UPDATE SET
-			return_1y = EXCLUDED.return_1y,
-			return_3y = EXCLUDED.return_3y,
-			return_5y = EXCLUDED.return_5y,
-			volatility_1y = EXCLUDED.volatility_1y,
-			sharpe_ratio = EXCLUDED.sharpe_ratio,
-			expense_ratio = EXCLUDED.expense_ratio,
+			as_of_date = EXCLUDED.as_of_date,
+			start_date = EXCLUDED.start_date,
+			end_date = EXCLUDED.end_date,
+			total_days = EXCLUDED.total_days,
+			nav_data_points = EXCLUDED.nav_data_points,
+			insufficient_data = EXCLUDED.insufficient_data,
+			rolling_return_min = EXCLUDED.rolling_return_min,
+			rolling_return_max = EXCLUDED.rolling_return_max,
+			rolling_return_median = EXCLUDED.rolling_return_median,
+			rolling_return_p25 = EXCLUDED.rolling_return_p25,
+			rolling_return_p75 = EXCLUDED.rolling_return_p75,
+			max_drawdown_decline_pct = EXCLUDED.max_drawdown_decline_pct,
+			max_drawdown_peak_date = EXCLUDED.max_drawdown_peak_date,
+			max_drawdown_trough_date = EXCLUDED.max_drawdown_trough_date,
+			cagr_min = EXCLUDED.cagr_min,
+			cagr_max = EXCLUDED.cagr_max,
+			cagr_median = EXCLUDED.cagr_median,
+			annualized_volatility = EXCLUDED.annualized_volatility,
 			updated_at = NOW()
 	`
 
 	_, err := r.db.Exec(ctx, q,
 		snapshot.FundID,
+		snapshot.WindowCode,
 		snapshot.AsOfDate,
-		snapshot.Return1Y,
-		snapshot.Return3Y,
-		snapshot.Return5Y,
-		snapshot.Volatility1Y,
-		snapshot.SharpeRatio,
-		snapshot.ExpenseRatio,
+		snapshot.StartDate,
+		snapshot.EndDate,
+		snapshot.TotalDays,
+		snapshot.NAVDataPoints,
+		snapshot.InsufficientData,
+		snapshot.RollingReturnMin,
+		snapshot.RollingReturnMax,
+		snapshot.RollingReturnMedian,
+		snapshot.RollingReturnP25,
+		snapshot.RollingReturnP75,
+		snapshot.MaxDrawdownDeclinePct,
+		snapshot.MaxDrawdownPeakDate,
+		snapshot.MaxDrawdownTroughDate,
+		snapshot.CAGRMin,
+		snapshot.CAGRMax,
+		snapshot.CAGRMedian,
+		snapshot.AnnualizedVolatility,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert analytics snapshot: %w", err)
@@ -234,30 +300,40 @@ func (r *PostgresAnalyticsRepository) Upsert(ctx context.Context, snapshot domai
 	return nil
 }
 
-func (r *PostgresAnalyticsRepository) GetLatestForFund(ctx context.Context, fundID int64) (domain.AnalyticsSnapshot, error) {
+func (r *PostgresAnalyticsRepository) GetByFundAndWindow(ctx context.Context, fundID int64, windowCode string) (domain.AnalyticsSnapshot, error) {
 	const q = `
 		SELECT
 			fund_id,
+			window_code,
 			as_of_date,
-			return_1y,
-			return_3y,
-			return_5y,
-			volatility_1y,
-			sharpe_ratio,
-			expense_ratio,
+			start_date,
+			end_date,
+			total_days,
+			nav_data_points,
+			insufficient_data,
+			rolling_return_min,
+			rolling_return_max,
+			rolling_return_median,
+			rolling_return_p25,
+			rolling_return_p75,
+			max_drawdown_decline_pct,
+			max_drawdown_peak_date,
+			max_drawdown_trough_date,
+			cagr_min,
+			cagr_max,
+			cagr_median,
+			annualized_volatility,
 			created_at,
 			updated_at
 		FROM analytics_snapshot
-		WHERE fund_id = $1
-		ORDER BY as_of_date DESC
-		LIMIT 1
+		WHERE fund_id = $1 AND window_code = $2
 	`
 
-	row := r.db.QueryRow(ctx, q, fundID)
+	row := r.db.QueryRow(ctx, q, fundID, windowCode)
 	return scanAnalyticsSnapshot(row)
 }
 
-func (r *PostgresAnalyticsRepository) TopByReturn1Y(ctx context.Context, asOfDate time.Time, limit int32) ([]domain.AnalyticsSnapshot, error) {
+func (r *PostgresAnalyticsRepository) ListByWindow(ctx context.Context, windowCode string, asOfDate time.Time, limit int32) ([]domain.AnalyticsSnapshot, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -265,24 +341,36 @@ func (r *PostgresAnalyticsRepository) TopByReturn1Y(ctx context.Context, asOfDat
 	const q = `
 		SELECT
 			fund_id,
+			window_code,
 			as_of_date,
-			return_1y,
-			return_3y,
-			return_5y,
-			volatility_1y,
-			sharpe_ratio,
-			expense_ratio,
+			start_date,
+			end_date,
+			total_days,
+			nav_data_points,
+			insufficient_data,
+			rolling_return_min,
+			rolling_return_max,
+			rolling_return_median,
+			rolling_return_p25,
+			rolling_return_p75,
+			max_drawdown_decline_pct,
+			max_drawdown_peak_date,
+			max_drawdown_trough_date,
+			cagr_min,
+			cagr_max,
+			cagr_median,
+			annualized_volatility,
 			created_at,
 			updated_at
 		FROM analytics_snapshot
-		WHERE as_of_date = $1
-		ORDER BY return_1y DESC
-		LIMIT $2
+		WHERE window_code = $1 AND as_of_date = $2
+		ORDER BY rolling_return_median DESC
+		LIMIT $3
 	`
 
-	rows, err := r.db.Query(ctx, q, asOfDate, limit)
+	rows, err := r.db.Query(ctx, q, windowCode, asOfDate, limit)
 	if err != nil {
-		return nil, fmt.Errorf("query top analytics: %w", err)
+		return nil, fmt.Errorf("query analytics by window: %w", err)
 	}
 	defer rows.Close()
 
@@ -296,7 +384,7 @@ func (r *PostgresAnalyticsRepository) TopByReturn1Y(ctx context.Context, asOfDat
 	}
 
 	if rows.Err() != nil {
-		return nil, fmt.Errorf("iterate top analytics: %w", rows.Err())
+		return nil, fmt.Errorf("iterate analytics by window: %w", rows.Err())
 	}
 
 	return out, nil
@@ -530,19 +618,52 @@ func scanNAVHistory(row interface{ Scan(dest ...any) error }) (domain.NAVHistory
 
 func scanAnalyticsSnapshot(row interface{ Scan(dest ...any) error }) (domain.AnalyticsSnapshot, error) {
 	var out domain.AnalyticsSnapshot
+	var startDate sql.NullTime
+	var endDate sql.NullTime
+	var peakDate sql.NullTime
+	var troughDate sql.NullTime
 	if err := row.Scan(
 		&out.FundID,
+		&out.WindowCode,
 		&out.AsOfDate,
-		&out.Return1Y,
-		&out.Return3Y,
-		&out.Return5Y,
-		&out.Volatility1Y,
-		&out.SharpeRatio,
-		&out.ExpenseRatio,
+		&startDate,
+		&endDate,
+		&out.TotalDays,
+		&out.NAVDataPoints,
+		&out.InsufficientData,
+		&out.RollingReturnMin,
+		&out.RollingReturnMax,
+		&out.RollingReturnMedian,
+		&out.RollingReturnP25,
+		&out.RollingReturnP75,
+		&out.MaxDrawdownDeclinePct,
+		&peakDate,
+		&troughDate,
+		&out.CAGRMin,
+		&out.CAGRMax,
+		&out.CAGRMedian,
+		&out.AnnualizedVolatility,
 		&out.CreatedAt,
 		&out.UpdatedAt,
 	); err != nil {
 		return domain.AnalyticsSnapshot{}, fmt.Errorf("scan analytics snapshot: %w", err)
+	}
+
+	if startDate.Valid {
+		value := startDate.Time
+		out.StartDate = &value
+	}
+	if endDate.Valid {
+		value := endDate.Time
+		out.EndDate = &value
+	}
+	if peakDate.Valid {
+		value := peakDate.Time
+		out.MaxDrawdownPeakDate = &value
+	}
+	if troughDate.Valid {
+		value := troughDate.Time
+		out.MaxDrawdownTroughDate = &value
 	}
 
 	return out, nil
