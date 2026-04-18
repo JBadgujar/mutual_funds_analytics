@@ -33,6 +33,10 @@ type SyncRepository interface {
 	CompleteRun(ctx context.Context, runID int64, status string, recordsProcessed int32, errorMessage string) error
 	UpsertFundState(ctx context.Context, state SyncFundState) error
 	ListPendingFundStates(ctx context.Context, now time.Time, limit int32) ([]SyncFundState, error)
+	GetLatestRunByTriggeredBy(ctx context.Context, triggeredBy string) (SyncRun, error)
+	GetActiveRun(ctx context.Context) (SyncRun, error)
+	GetLatestRun(ctx context.Context) (SyncRun, error)
+	ListFundStates(ctx context.Context, limit, offset int32) ([]SyncFundStateView, error)
 }
 
 type RateLimitStateRepository interface {

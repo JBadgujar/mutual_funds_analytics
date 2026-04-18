@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +113,29 @@ type contractAnalyticsRepo struct {
 	rankedRows   []domain.RankedFund
 	totalRanked  int64
 	listRankCall int
+}
+
+type fakeSyncController struct {
+	triggerRun domain.SyncRun
+	triggerErr error
+	currentRun *domain.SyncRun
+	lastRun    *domain.SyncRun
+	states     []domain.SyncFundStateView
+	statusErr  error
+}
+
+func (f *fakeSyncController) TriggerIncremental(ctx context.Context, source string) (domain.SyncRun, error) {
+	if f.triggerErr != nil {
+		return domain.SyncRun{}, f.triggerErr
+	}
+	return f.triggerRun, nil
+}
+
+func (f *fakeSyncController) GetStatus(ctx context.Context, limit, offset int32) (*domain.SyncRun, *domain.SyncRun, []domain.SyncFundStateView, error) {
+	if f.statusErr != nil {
+		return nil, nil, nil, f.statusErr
+	}
+	return f.currentRun, f.lastRun, f.states, nil
 }
 
 func (r *contractAnalyticsRepo) Upsert(ctx context.Context, snapshot domain.AnalyticsSnapshot) error {
@@ -583,5 +607,89 @@ func TestFundsContract_RankCacheHit(t *testing.T) {
 
 	if analytics.listRankCall != 2 {
 		t.Fatalf("expected ranking repo to be called again after invalidation, got %d", analytics.listRankCall)
+	}
+}
+
+func TestSyncContract_Trigger202(t *testing.T) {
+	now := time.Date(2026, 1, 6, 12, 0, 0, 0, time.UTC)
+	controller := &fakeSyncController{triggerRun: domain.SyncRun{ID: 99, Status: "running", TriggeredBy: "manual-api:123", StartedAt: now}}
+
+	api := NewAPI(&contractFundRepo{byCode: map[string]domain.FundSummary{}}, &contractAnalyticsRepo{})
+	api.SetSyncController(controller)
+	router := NewRouter(api)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/trigger", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if body["run_id"] != float64(99) {
+		t.Fatalf("unexpected run_id: %v", body["run_id"])
+	}
+	if body["status"] != "running" {
+		t.Fatalf("unexpected status: %v", body["status"])
+	}
+}
+
+func TestSyncContract_Trigger409(t *testing.T) {
+	controller := &fakeSyncController{triggerErr: errors.New("sync already running")}
+
+	api := NewAPI(&contractFundRepo{byCode: map[string]domain.FundSummary{}}, &contractAnalyticsRepo{})
+	api.SetSyncController(controller)
+	router := NewRouter(api)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync/trigger", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rec.Code)
+	}
+}
+
+func TestSyncContract_Status200(t *testing.T) {
+	now := time.Date(2026, 1, 6, 12, 0, 0, 0, time.UTC)
+	completedAt := now.Add(2 * time.Minute)
+
+	controller := &fakeSyncController{
+		currentRun: &domain.SyncRun{ID: 101, Status: "running", TriggeredBy: "manual-api:123", StartedAt: now, UpdatedAt: now},
+		lastRun:    &domain.SyncRun{ID: 100, Status: "partial", TriggeredBy: "scheduler:11", StartedAt: now.Add(-time.Hour), CompletedAt: &completedAt, RecordsProcessed: 8, ErrorMessage: "2 fund(s) failed during sync", UpdatedAt: completedAt},
+		states: []domain.SyncFundStateView{
+			{FundID: 1, SchemeCode: "119598", FundName: "Axis Mid Cap Fund - Direct Plan - Growth", Category: "Mid Cap Direct Growth", Status: "synced", UpdatedAt: now},
+			{FundID: 2, SchemeCode: "130503", FundName: "HDFC Small Cap Fund - Direct Plan - Growth", Category: "Small Cap Direct Growth", Status: "failed", LastError: "network timeout", UpdatedAt: now},
+		},
+	}
+
+	api := NewAPI(&contractFundRepo{byCode: map[string]domain.FundSummary{}}, &contractAnalyticsRepo{})
+	api.SetSyncController(controller)
+	router := NewRouter(api)
+
+	req := httptest.NewRequest(http.MethodGet, "/sync/status", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	summary := body["summary"].(map[string]any)
+	if summary["total_funds"] != float64(2) {
+		t.Fatalf("unexpected total_funds: %v", summary["total_funds"])
+	}
+	if summary["failed"] != float64(1) {
+		t.Fatalf("unexpected failed count: %v", summary["failed"])
 	}
 }

@@ -706,6 +706,92 @@ func (r *PostgresSyncRepository) ListPendingFundStates(ctx context.Context, now 
 	return out, nil
 }
 
+func (r *PostgresSyncRepository) GetLatestRunByTriggeredBy(ctx context.Context, triggeredBy string) (domain.SyncRun, error) {
+	const q = `
+		SELECT id, started_at, completed_at, status, triggered_by, records_processed, error_message, updated_at
+		FROM sync_runs
+		WHERE triggered_by = $1
+		ORDER BY id DESC
+		LIMIT 1
+	`
+
+	row := r.db.QueryRow(ctx, q, triggeredBy)
+	return scanSyncRun(row)
+}
+
+func (r *PostgresSyncRepository) GetActiveRun(ctx context.Context) (domain.SyncRun, error) {
+	const q = `
+		SELECT id, started_at, completed_at, status, triggered_by, records_processed, error_message, updated_at
+		FROM sync_runs
+		WHERE status IN ('queued', 'running')
+		ORDER BY id DESC
+		LIMIT 1
+	`
+
+	row := r.db.QueryRow(ctx, q)
+	return scanSyncRun(row)
+}
+
+func (r *PostgresSyncRepository) GetLatestRun(ctx context.Context) (domain.SyncRun, error) {
+	const q = `
+		SELECT id, started_at, completed_at, status, triggered_by, records_processed, error_message, updated_at
+		FROM sync_runs
+		ORDER BY id DESC
+		LIMIT 1
+	`
+
+	row := r.db.QueryRow(ctx, q)
+	return scanSyncRun(row)
+}
+
+func (r *PostgresSyncRepository) ListFundStates(ctx context.Context, limit, offset int32) ([]domain.SyncFundStateView, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+
+	const q = `
+		SELECT
+			s.fund_id,
+			f.scheme_code,
+			f.name,
+			f.category,
+			s.last_synced_at,
+			s.last_nav_date,
+			s.status,
+			s.retry_count,
+			s.next_retry_at,
+			s.last_error,
+			s.updated_at,
+			s.last_run_id,
+			s.consecutive_ok
+		FROM sync_fund_state s
+		JOIN funds f ON f.id = s.fund_id
+		ORDER BY f.name ASC
+		LIMIT $1 OFFSET $2
+	`
+
+	rows, err := r.db.Query(ctx, q, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query sync fund states: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.SyncFundStateView, 0, limit)
+	for rows.Next() {
+		state, scanErr := scanSyncFundStateView(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, state)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate sync fund states: %w", rows.Err())
+	}
+
+	return out, nil
+}
+
 func (r *PostgresRateLimitStateRepository) Upsert(ctx context.Context, state domain.RateLimitState) error {
 	const q = `
 		INSERT INTO rate_limit_state (
@@ -965,6 +1051,51 @@ func scanSyncFundState(row interface{ Scan(dest ...any) error }) (domain.SyncFun
 		&out.ConsecutiveOK,
 	); err != nil {
 		return domain.SyncFundState{}, fmt.Errorf("scan sync fund state: %w", err)
+	}
+
+	if lastSyncedAt.Valid {
+		value := lastSyncedAt.Time
+		out.LastSyncedAt = &value
+	}
+	if lastNAVDate.Valid {
+		value := lastNAVDate.Time
+		out.LastNAVDate = &value
+	}
+	if nextRetryAt.Valid {
+		value := nextRetryAt.Time
+		out.NextRetryAt = &value
+	}
+	if lastRunID.Valid {
+		value := lastRunID.Int64
+		out.LastRunID = &value
+	}
+
+	return out, nil
+}
+
+func scanSyncFundStateView(row interface{ Scan(dest ...any) error }) (domain.SyncFundStateView, error) {
+	var out domain.SyncFundStateView
+	var lastSyncedAt sql.NullTime
+	var lastNAVDate sql.NullTime
+	var nextRetryAt sql.NullTime
+	var lastRunID sql.NullInt64
+
+	if err := row.Scan(
+		&out.FundID,
+		&out.SchemeCode,
+		&out.FundName,
+		&out.Category,
+		&lastSyncedAt,
+		&lastNAVDate,
+		&out.Status,
+		&out.RetryCount,
+		&nextRetryAt,
+		&out.LastError,
+		&out.UpdatedAt,
+		&lastRunID,
+		&out.ConsecutiveOK,
+	); err != nil {
+		return domain.SyncFundStateView{}, fmt.Errorf("scan sync fund state view: %w", err)
 	}
 
 	if lastSyncedAt.Valid {

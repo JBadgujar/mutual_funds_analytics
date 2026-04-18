@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"mutual-fund-analytics/internal/domain"
+	"mutual-fund-analytics/internal/syncer"
 )
 
 var allowedWindows = map[string]struct{}{
@@ -52,6 +54,12 @@ type API struct {
 	funds     domain.FundRepository
 	analytics domain.AnalyticsRepository
 	rankCache *rankingCache
+	syncs     SyncController
+}
+
+type SyncController interface {
+	TriggerIncremental(ctx context.Context, source string) (domain.SyncRun, error)
+	GetStatus(ctx context.Context, limit, offset int32) (*domain.SyncRun, *domain.SyncRun, []domain.SyncFundStateView, error)
 }
 
 type FundsQuery struct {
@@ -68,6 +76,10 @@ func NewAPI(funds domain.FundRepository, analytics domain.AnalyticsRepository) *
 		analytics: analytics,
 		rankCache: newRankingCache(60 * time.Second),
 	}
+}
+
+func (a *API) SetSyncController(controller SyncController) {
+	a.syncs = controller
 }
 
 type RankQuery struct {
@@ -152,6 +164,106 @@ func (a *API) HandleRankFunds(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) InvalidateRankingCache() {
 	a.rankCache.Invalidate()
+}
+
+func (a *API) HandleSyncTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+
+	if a.syncs == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "sync control plane is not configured")
+		return
+	}
+
+	run, err := a.syncs.TriggerIncremental(r.Context(), "manual-api")
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			writeError(w, http.StatusRequestTimeout, "timeout", "sync trigger timed out")
+		case errors.Is(err, syncer.ErrSyncAlreadyRunning), strings.Contains(strings.ToLower(err.Error()), "already running"):
+			writeError(w, http.StatusConflict, "conflict", "sync run already active")
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to trigger sync")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"run_id":       run.ID,
+		"status":       run.Status,
+		"triggered_by": run.TriggeredBy,
+		"started_at":   run.StartedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+func (a *API) HandleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	if a.syncs == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "sync control plane is not configured")
+		return
+	}
+
+	limit, offset, err := parsePagination(r, 500)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
+		return
+	}
+
+	currentRun, lastRun, fundStates, err := a.syncs.GetStatus(r.Context(), limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to fetch sync status")
+		return
+	}
+
+	pending := 0
+	synced := 0
+	failed := 0
+	for _, state := range fundStates {
+		switch state.Status {
+		case "pending":
+			pending++
+		case "synced":
+			synced++
+		case "failed":
+			failed++
+		}
+	}
+
+	states := make([]map[string]any, 0, len(fundStates))
+	for _, state := range fundStates {
+		states = append(states, map[string]any{
+			"fund_id":        state.FundID,
+			"fund_code":      state.SchemeCode,
+			"fund_name":      state.FundName,
+			"category":       state.Category,
+			"status":         state.Status,
+			"retry_count":    state.RetryCount,
+			"next_retry_at":  formatDateTime(state.NextRetryAt),
+			"last_error":     state.LastError,
+			"last_synced_at": formatDateTime(state.LastSyncedAt),
+			"last_nav_date":  formatDate(state.LastNAVDate),
+			"updated_at":     state.UpdatedAt.UTC().Format(time.RFC3339),
+			"last_run_id":    state.LastRunID,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_run": toSyncRunPayload(currentRun),
+		"last_run":    toSyncRunPayload(lastRun),
+		"summary": map[string]any{
+			"total_funds": len(fundStates),
+			"pending":     pending,
+			"synced":      synced,
+			"failed":      failed,
+		},
+		"fund_states": states,
+	})
 }
 
 func (a *API) HandleListFunds(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +544,30 @@ func parseFundCodeFromPath(path string) (string, error) {
 	return code, nil
 }
 
+func parsePagination(r *http.Request, defaultLimit int32) (int32, int32, error) {
+	query := r.URL.Query()
+
+	limit := defaultLimit
+	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 || parsed > 1000 {
+			return 0, 0, fmt.Errorf("limit must be an integer between 1 and 1000")
+		}
+		limit = int32(parsed)
+	}
+
+	offset := int32(0)
+	if rawOffset := strings.TrimSpace(query.Get("offset")); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			return 0, 0, fmt.Errorf("offset must be a non-negative integer")
+		}
+		offset = int32(parsed)
+	}
+
+	return limit, offset, nil
+}
+
 func parseFundCodeFromAnalyticsPath(path string) (string, error) {
 	trimmed := strings.Trim(path, "/")
 	parts := strings.Split(trimmed, "/")
@@ -481,6 +617,31 @@ func formatDate(value *time.Time) *string {
 	}
 	formatted := value.UTC().Format("2006-01-02")
 	return &formatted
+}
+
+func formatDateTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339)
+	return &formatted
+}
+
+func toSyncRunPayload(run *domain.SyncRun) any {
+	if run == nil {
+		return nil
+	}
+
+	return map[string]any{
+		"run_id":            run.ID,
+		"status":            run.Status,
+		"triggered_by":      run.TriggeredBy,
+		"records_processed": run.RecordsProcessed,
+		"error":             run.ErrorMessage,
+		"started_at":        run.StartedAt.UTC().Format(time.RFC3339),
+		"completed_at":      formatDateTime(run.CompletedAt),
+		"updated_at":        run.UpdatedAt.UTC().Format(time.RFC3339),
+	}
 }
 
 func isNotFound(err error) bool {

@@ -11,7 +11,7 @@ const (
 	defaultPort         = "8080"
 	defaultDatabaseURL  = "postgres://postgres:postgres@localhost:5432/mutual_fund_analytics?sslmode=disable"
 	defaultLogLevel     = "info"
-	defaultSyncSchedule = "@every 1h"
+	defaultSyncSchedule = "@daily"
 )
 
 type Config struct {

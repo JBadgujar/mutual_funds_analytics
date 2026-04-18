@@ -104,6 +104,22 @@ type SyncFundState struct {
 	ConsecutiveOK int32
 }
 
+type SyncFundStateView struct {
+	FundID        int64
+	SchemeCode    string
+	FundName      string
+	Category      string
+	LastSyncedAt  *time.Time
+	LastNAVDate   *time.Time
+	Status        string
+	RetryCount    int32
+	NextRetryAt   *time.Time
+	LastError     string
+	UpdatedAt     time.Time
+	LastRunID     *int64
+	ConsecutiveOK int32
+}
+
 type RateLimitState struct {
 	Provider      string
 	WindowStart   time.Time

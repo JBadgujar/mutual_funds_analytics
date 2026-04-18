@@ -75,6 +75,13 @@ func main() {
 	navRepo := storage.NewNavRepository(pool)
 	analyticsRepo := storage.NewAnalyticsRepository(pool)
 	syncRepo := storage.NewSyncRepository(pool)
+	apiLimiter := limiter.NewPersistentLimiter(pool)
+	mfClient, err := mfapi.NewClient(nil, apiLimiter)
+	if err != nil {
+		logger.Error("failed to create mfapi client", "error", err)
+		os.Exit(1)
+	}
+	orchestrator := syncer.NewOrchestrator(pool, fundRepo, navRepo, syncRepo, mfClient)
 
 	if *recomputeAnalyticsOnly {
 		runAnalyticsRecompute(ctx, logger, fundRepo, navRepo, analyticsRepo)
@@ -82,13 +89,6 @@ func main() {
 	}
 
 	if *syncBackfillOnly || *syncBackfillRecomputeOnly {
-		apiLimiter := limiter.NewPersistentLimiter(pool)
-		mfClient, err := mfapi.NewClient(nil, apiLimiter)
-		if err != nil {
-			logger.Error("failed to create mfapi client", "error", err)
-			os.Exit(1)
-		}
-
 		discovery := syncer.NewDiscoveryService(mfClient, fundRepo)
 		discoveryResult, err := discovery.DiscoverAndTrack(ctx)
 		if err != nil {
@@ -101,7 +101,6 @@ func main() {
 			"tracked_schemes", len(discoveryResult.TrackedSchemes),
 		)
 
-		orchestrator := syncer.NewOrchestrator(pool, fundRepo, navRepo, syncRepo, mfClient)
 		syncResult, err := orchestrator.RunBackfill(ctx, "manual-cli")
 		if err != nil {
 			logger.Error("backfill sync failed", "error", err)
@@ -125,6 +124,20 @@ func main() {
 	}
 
 	api := httptransport.NewAPI(fundRepo, analyticsRepo)
+	controlPlane := syncer.NewControlPlane(ctx, orchestrator, syncRepo, logger)
+	api.SetSyncController(controlPlane)
+
+	enabled, interval, err := syncer.ParseScheduleInterval(cfg.SyncSchedule)
+	if err != nil {
+		logger.Error("invalid sync schedule", "schedule", cfg.SyncSchedule, "error", err)
+		os.Exit(1)
+	}
+	if enabled {
+		scheduler := syncer.NewScheduler(controlPlane, logger, interval)
+		scheduler.Start(ctx)
+	} else {
+		logger.Info("sync scheduler disabled", "schedule", cfg.SyncSchedule)
+	}
 
 	server := &stdhttp.Server{
 		Addr:              ":" + cfg.Port,
@@ -146,6 +159,10 @@ func main() {
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+	}
+
+	if err := controlPlane.Shutdown(shutdownCtx); err != nil {
+		logger.Error("sync control plane shutdown failed", "error", err)
 	}
 
 	logger.Info("server stopped")
