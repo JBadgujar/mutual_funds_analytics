@@ -47,9 +47,13 @@ func main() {
 		return
 	}
 
+	fundRepo := storage.NewFundRepository(pool)
+	analyticsRepo := storage.NewAnalyticsRepository(pool)
+	api := httptransport.NewAPI(fundRepo, analyticsRepo)
+
 	server := &stdhttp.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           httptransport.NewRouter(),
+		Handler:           httptransport.NewRouter(api),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

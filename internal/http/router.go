@@ -3,11 +3,23 @@ package http
 import (
 	"encoding/json"
 	stdhttp "net/http"
+	"strings"
 )
 
-func NewRouter() stdhttp.Handler {
+func NewRouter(api *API) stdhttp.Handler {
 	mux := stdhttp.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	if api != nil {
+		mux.HandleFunc("/funds", api.HandleListFunds)
+		mux.HandleFunc("/funds/", func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+			path := strings.Trim(r.URL.Path, "/")
+			if strings.HasSuffix(path, "/analytics") {
+				api.HandleGetFundAnalytics(w, r)
+				return
+			}
+			api.HandleGetFund(w, r)
+		})
+	}
 	return mux
 }
 

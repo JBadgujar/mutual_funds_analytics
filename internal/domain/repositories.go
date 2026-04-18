@@ -9,6 +9,9 @@ type FundRepository interface {
 	Upsert(ctx context.Context, fund Fund) (Fund, error)
 	GetBySchemeCode(ctx context.Context, schemeCode string) (Fund, error)
 	ListActive(ctx context.Context, limit, offset int32) ([]Fund, error)
+	ListFiltered(ctx context.Context, category, amc string, limit, offset int32) ([]Fund, error)
+	GetSummaryBySchemeCode(ctx context.Context, schemeCode string) (FundSummary, error)
+	ListSummaries(ctx context.Context, category, amcPrefix string, limit, offset int32) ([]FundSummary, error)
 }
 
 type NavRepository interface {

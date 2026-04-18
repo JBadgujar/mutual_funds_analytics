@@ -13,6 +13,19 @@ type Fund struct {
 	UpdatedAt  time.Time
 }
 
+type FundSummary struct {
+	ID            int64
+	SchemeCode    string
+	Name          string
+	Category      string
+	ISIN          string
+	Active        bool
+	LatestNAVDate *time.Time
+	LatestNAV     *float64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type NAVHistory struct {
 	FundID    int64
 	NAVDate   time.Time

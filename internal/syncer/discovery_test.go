@@ -65,6 +65,51 @@ func (m *memoryFundRepo) ListActive(ctx context.Context, limit, offset int32) ([
 	return out, nil
 }
 
+func (m *memoryFundRepo) ListFiltered(ctx context.Context, category, amc string, limit, offset int32) ([]domain.Fund, error) {
+	return m.ListActive(ctx, limit, offset)
+}
+
+func (m *memoryFundRepo) GetSummaryBySchemeCode(ctx context.Context, schemeCode string) (domain.FundSummary, error) {
+	fund, err := m.GetBySchemeCode(ctx, schemeCode)
+	if err != nil {
+		return domain.FundSummary{}, err
+	}
+
+	return domain.FundSummary{
+		ID:         fund.ID,
+		SchemeCode: fund.SchemeCode,
+		Name:       fund.Name,
+		Category:   fund.Category,
+		ISIN:       fund.ISIN,
+		Active:     fund.Active,
+		CreatedAt:  fund.CreatedAt,
+		UpdatedAt:  fund.UpdatedAt,
+	}, nil
+}
+
+func (m *memoryFundRepo) ListSummaries(ctx context.Context, category, amcPrefix string, limit, offset int32) ([]domain.FundSummary, error) {
+	funds, err := m.ListActive(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.FundSummary, 0, len(funds))
+	for _, fund := range funds {
+		out = append(out, domain.FundSummary{
+			ID:         fund.ID,
+			SchemeCode: fund.SchemeCode,
+			Name:       fund.Name,
+			Category:   fund.Category,
+			ISIN:       fund.ISIN,
+			Active:     fund.Active,
+			CreatedAt:  fund.CreatedAt,
+			UpdatedAt:  fund.UpdatedAt,
+		})
+	}
+
+	return out, nil
+}
+
 func TestDiscoveryService_DiscoverAndTrack_FiltersAndStores(t *testing.T) {
 	client := fakeSchemeClient{items: []mfapi.SchemeSummary{
 		{SchemeCode: "1001", SchemeName: "ICICI Prudential Mid Cap Fund - Direct Plan - Growth"},

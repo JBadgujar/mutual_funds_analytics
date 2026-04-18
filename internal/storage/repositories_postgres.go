@@ -128,6 +128,125 @@ func (r *PostgresFundRepository) ListActive(ctx context.Context, limit, offset i
 	return out, nil
 }
 
+func (r *PostgresFundRepository) ListFiltered(ctx context.Context, category, amc string, limit, offset int32) ([]domain.Fund, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	const q = `
+		SELECT id, scheme_code, name, category, isin, active, created_at, updated_at
+		FROM funds
+		WHERE active = TRUE
+		  AND ($1 = '' OR category = $1)
+		  AND ($2 = '' OR name ILIKE ('%' || $2 || '%'))
+		ORDER BY name ASC
+		LIMIT $3 OFFSET $4
+	`
+
+	rows, err := r.db.Query(ctx, q, category, amc, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query filtered funds: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.Fund, 0, limit)
+	for rows.Next() {
+		fund, scanErr := scanFund(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, fund)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate filtered funds: %w", rows.Err())
+	}
+
+	return out, nil
+}
+
+func (r *PostgresFundRepository) GetSummaryBySchemeCode(ctx context.Context, schemeCode string) (domain.FundSummary, error) {
+	const q = `
+		SELECT
+			f.id,
+			f.scheme_code,
+			f.name,
+			f.category,
+			f.isin,
+			f.active,
+			n.nav_date,
+			n.nav,
+			f.created_at,
+			f.updated_at
+		FROM funds f
+		LEFT JOIN LATERAL (
+			SELECT nav_date, nav
+			FROM nav_history nh
+			WHERE nh.fund_id = f.id
+			ORDER BY nav_date DESC
+			LIMIT 1
+		) n ON TRUE
+		WHERE f.scheme_code = $1
+	`
+
+	row := r.db.QueryRow(ctx, q, schemeCode)
+	return scanFundSummary(row)
+}
+
+func (r *PostgresFundRepository) ListSummaries(ctx context.Context, category, amcPrefix string, limit, offset int32) ([]domain.FundSummary, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	const q = `
+		SELECT
+			f.id,
+			f.scheme_code,
+			f.name,
+			f.category,
+			f.isin,
+			f.active,
+			n.nav_date,
+			n.nav,
+			f.created_at,
+			f.updated_at
+		FROM funds f
+		LEFT JOIN LATERAL (
+			SELECT nav_date, nav
+			FROM nav_history nh
+			WHERE nh.fund_id = f.id
+			ORDER BY nav_date DESC
+			LIMIT 1
+		) n ON TRUE
+		WHERE f.active = TRUE
+		  AND ($1 = '' OR f.category = $1)
+		  AND ($2 = '' OR f.name LIKE ($2 || '%'))
+		ORDER BY f.name ASC
+		LIMIT $3 OFFSET $4
+	`
+
+	rows, err := r.db.Query(ctx, q, category, amcPrefix, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query fund summaries: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]domain.FundSummary, 0, limit)
+	for rows.Next() {
+		summary, scanErr := scanFundSummary(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, summary)
+	}
+
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate fund summaries: %w", rows.Err())
+	}
+
+	return out, nil
+}
+
 func (r *PostgresNavRepository) Upsert(ctx context.Context, nav domain.NAVHistory) error {
 	const q = `
 		INSERT INTO nav_history (fund_id, nav_date, nav, source)
@@ -595,6 +714,38 @@ func scanFund(row interface{ Scan(dest ...any) error }) (domain.Fund, error) {
 		&out.UpdatedAt,
 	); err != nil {
 		return domain.Fund{}, fmt.Errorf("scan fund: %w", err)
+	}
+
+	return out, nil
+}
+
+func scanFundSummary(row interface{ Scan(dest ...any) error }) (domain.FundSummary, error) {
+	var out domain.FundSummary
+	var latestNAVDate sql.NullTime
+	var latestNAV sql.NullFloat64
+
+	if err := row.Scan(
+		&out.ID,
+		&out.SchemeCode,
+		&out.Name,
+		&out.Category,
+		&out.ISIN,
+		&out.Active,
+		&latestNAVDate,
+		&latestNAV,
+		&out.CreatedAt,
+		&out.UpdatedAt,
+	); err != nil {
+		return domain.FundSummary{}, fmt.Errorf("scan fund summary: %w", err)
+	}
+
+	if latestNAVDate.Valid {
+		value := latestNAVDate.Time
+		out.LatestNAVDate = &value
+	}
+	if latestNAV.Valid {
+		value := latestNAV.Float64
+		out.LatestNAV = &value
 	}
 
 	return out, nil
