@@ -21,6 +21,7 @@ type ControlPlane struct {
 	orchestrator *Orchestrator
 	syncs        domain.SyncRepository
 	logger       *slog.Logger
+	postSyncHook func(context.Context) error
 
 	shuttingDown atomic.Bool
 	triggerSeq   atomic.Uint64
@@ -38,6 +39,10 @@ func NewControlPlane(baseCtx context.Context, orchestrator *Orchestrator, syncs 
 		syncs:        syncs,
 		logger:       logger,
 	}
+}
+
+func (c *ControlPlane) SetPostSyncHook(fn func(context.Context) error) {
+	c.postSyncHook = fn
 }
 
 type runOutcome struct {
@@ -79,6 +84,13 @@ func (c *ControlPlane) TriggerIncremental(ctx context.Context, source string) (d
 			"failed_funds", result.FailedFunds,
 			"inserted_nav_rows", result.InsertedNAVRows,
 		)
+
+		if c.postSyncHook != nil {
+			if err := c.postSyncHook(c.baseCtx); err != nil {
+				c.logger.Error("post-sync hook failed", "triggered_by", triggeredBy, "error", err)
+			}
+		}
+
 		outcomeCh <- runOutcome{result: result, err: nil}
 	}()
 

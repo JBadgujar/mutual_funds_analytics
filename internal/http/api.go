@@ -121,7 +121,15 @@ func (a *API) HandleRankFunds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if total == 0 {
-		writeError(w, http.StatusNotFound, "not_found", "no ranked funds found")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"category":    query.Category,
+			"window":      query.Window,
+			"sorted_by":   query.SortBy,
+			"total_funds": 0,
+			"showing":     0,
+			"funds":       []any{},
+			"note":        "no ranked funds available for requested window; data may be insufficient",
+		})
 		return
 	}
 

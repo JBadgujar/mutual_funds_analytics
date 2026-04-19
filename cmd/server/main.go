@@ -125,6 +125,20 @@ func main() {
 
 	api := httptransport.NewAPI(fundRepo, analyticsRepo)
 	controlPlane := syncer.NewControlPlane(ctx, orchestrator, syncRepo, logger)
+	controlPlane.SetPostSyncHook(func(hookCtx context.Context) error {
+		engine := analytics.NewEngine(fundRepo, navRepo, analyticsRepo)
+		result, err := engine.RecomputeAll(hookCtx)
+		if err != nil {
+			return err
+		}
+
+		logger.Info("post-sync analytics recompute completed",
+			"funds_processed", result.FundsProcessed,
+			"snapshots_generated", result.SnapshotsGenerated,
+			"insufficient_snapshots", result.InsufficientSnapshots,
+		)
+		return nil
+	})
 	api.SetSyncController(controlPlane)
 
 	enabled, interval, err := syncer.ParseScheduleInterval(cfg.SyncSchedule)
