@@ -169,11 +169,6 @@ func (a *API) HandleRankFunds(w http.ResponseWriter, r *http.Request) {
 	a.rankCache.Set(cacheKey, payload, time.Now().UTC())
 	writeJSONBytes(w, http.StatusOK, payload)
 }
-
-func (a *API) InvalidateRankingCache() {
-	a.rankCache.Invalidate()
-}
-
 func (a *API) HandleSyncTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w, http.MethodPost)

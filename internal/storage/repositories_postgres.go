@@ -34,15 +34,10 @@ type PostgresSyncRepository struct {
 	db DBTX
 }
 
-type PostgresRateLimitStateRepository struct {
-	db DBTX
-}
-
 var _ domain.FundRepository = (*PostgresFundRepository)(nil)
 var _ domain.NavRepository = (*PostgresNavRepository)(nil)
 var _ domain.AnalyticsRepository = (*PostgresAnalyticsRepository)(nil)
 var _ domain.SyncRepository = (*PostgresSyncRepository)(nil)
-var _ domain.RateLimitStateRepository = (*PostgresRateLimitStateRepository)(nil)
 
 func NewFundRepository(db DBTX) domain.FundRepository {
 	return &PostgresFundRepository{db: db}
@@ -60,10 +55,6 @@ func NewSyncRepository(db DBTX) domain.SyncRepository {
 	return &PostgresSyncRepository{db: db}
 }
 
-func NewRateLimitStateRepository(db DBTX) domain.RateLimitStateRepository {
-	return &PostgresRateLimitStateRepository{db: db}
-}
-
 func (r *PostgresFundRepository) Upsert(ctx context.Context, fund domain.Fund) (domain.Fund, error) {
 	const q = `
 		INSERT INTO funds (scheme_code, name, category, isin, active)
@@ -79,17 +70,6 @@ func (r *PostgresFundRepository) Upsert(ctx context.Context, fund domain.Fund) (
 	`
 
 	row := r.db.QueryRow(ctx, q, fund.SchemeCode, fund.Name, fund.Category, fund.ISIN, fund.Active)
-	return scanFund(row)
-}
-
-func (r *PostgresFundRepository) GetBySchemeCode(ctx context.Context, schemeCode string) (domain.Fund, error) {
-	const q = `
-		SELECT id, scheme_code, name, category, isin, active, created_at, updated_at
-		FROM funds
-		WHERE scheme_code = $1
-	`
-
-	row := r.db.QueryRow(ctx, q, schemeCode)
 	return scanFund(row)
 }
 
@@ -123,43 +103,6 @@ func (r *PostgresFundRepository) ListActive(ctx context.Context, limit, offset i
 
 	if rows.Err() != nil {
 		return nil, fmt.Errorf("iterate active funds: %w", rows.Err())
-	}
-
-	return out, nil
-}
-
-func (r *PostgresFundRepository) ListFiltered(ctx context.Context, category, amc string, limit, offset int32) ([]domain.Fund, error) {
-	if limit <= 0 {
-		limit = 100
-	}
-
-	const q = `
-		SELECT id, scheme_code, name, category, isin, active, created_at, updated_at
-		FROM funds
-		WHERE active = TRUE
-		  AND ($1 = '' OR category = $1)
-		  AND ($2 = '' OR name ILIKE ('%' || $2 || '%'))
-		ORDER BY name ASC
-		LIMIT $3 OFFSET $4
-	`
-
-	rows, err := r.db.Query(ctx, q, category, amc, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("query filtered funds: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]domain.Fund, 0, limit)
-	for rows.Next() {
-		fund, scanErr := scanFund(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		out = append(out, fund)
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("iterate filtered funds: %w", rows.Err())
 	}
 
 	return out, nil
@@ -264,17 +207,6 @@ func (r *PostgresNavRepository) Upsert(ctx context.Context, nav domain.NAVHistor
 	}
 
 	return nil
-}
-
-func (r *PostgresNavRepository) GetByDate(ctx context.Context, fundID int64, navDate time.Time) (domain.NAVHistory, error) {
-	const q = `
-		SELECT fund_id, nav_date, nav, source, created_at, updated_at
-		FROM nav_history
-		WHERE fund_id = $1 AND nav_date = $2
-	`
-
-	row := r.db.QueryRow(ctx, q, fundID, navDate)
-	return scanNAVHistory(row)
 }
 
 func (r *PostgresNavRepository) GetLatestByFundID(ctx context.Context, fundID int64, limit int32) ([]domain.NAVHistory, error) {
@@ -452,63 +384,6 @@ func (r *PostgresAnalyticsRepository) GetByFundAndWindow(ctx context.Context, fu
 	return scanAnalyticsSnapshot(row)
 }
 
-func (r *PostgresAnalyticsRepository) ListByWindow(ctx context.Context, windowCode string, asOfDate time.Time, limit int32) ([]domain.AnalyticsSnapshot, error) {
-	if limit <= 0 {
-		limit = 20
-	}
-
-	const q = `
-		SELECT
-			fund_id,
-			window_code,
-			as_of_date,
-			start_date,
-			end_date,
-			total_days,
-			nav_data_points,
-			insufficient_data,
-			rolling_return_min,
-			rolling_return_max,
-			rolling_return_median,
-			rolling_return_p25,
-			rolling_return_p75,
-			max_drawdown_decline_pct,
-			max_drawdown_peak_date,
-			max_drawdown_trough_date,
-			cagr_min,
-			cagr_max,
-			cagr_median,
-			annualized_volatility,
-			created_at,
-			updated_at
-		FROM analytics_snapshot
-		WHERE window_code = $1 AND as_of_date = $2
-		ORDER BY rolling_return_median DESC
-		LIMIT $3
-	`
-
-	rows, err := r.db.Query(ctx, q, windowCode, asOfDate, limit)
-	if err != nil {
-		return nil, fmt.Errorf("query analytics by window: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]domain.AnalyticsSnapshot, 0, limit)
-	for rows.Next() {
-		snapshot, scanErr := scanAnalyticsSnapshot(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		out = append(out, snapshot)
-	}
-
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("iterate analytics by window: %w", rows.Err())
-	}
-
-	return out, nil
-}
-
 func (r *PostgresAnalyticsRepository) ListRanked(ctx context.Context, query domain.RankQuery) ([]domain.RankedFund, int64, error) {
 	if query.Limit <= 0 {
 		query.Limit = 10
@@ -582,17 +457,6 @@ func (r *PostgresAnalyticsRepository) ListRanked(ctx context.Context, query doma
 	}
 
 	return out, total, nil
-}
-
-func (r *PostgresSyncRepository) StartRun(ctx context.Context, triggeredBy string) (domain.SyncRun, error) {
-	const q = `
-		INSERT INTO sync_runs (status, triggered_by)
-		VALUES ('running', $1)
-		RETURNING id, started_at, completed_at, status, triggered_by, records_processed, error_message, updated_at
-	`
-
-	row := r.db.QueryRow(ctx, q, triggeredBy)
-	return scanSyncRun(row)
 }
 
 func (r *PostgresSyncRepository) CompleteRun(ctx context.Context, runID int64, status string, recordsProcessed int32, errorMessage string) error {
@@ -790,76 +654,6 @@ func (r *PostgresSyncRepository) ListFundStates(ctx context.Context, limit, offs
 	}
 
 	return out, nil
-}
-
-func (r *PostgresRateLimitStateRepository) Upsert(ctx context.Context, state domain.RateLimitState) error {
-	const q = `
-		INSERT INTO rate_limit_state (
-			provider,
-			window_start,
-			window_seconds,
-			request_count,
-			second_bucket,
-			minute_bucket,
-			hour_bucket,
-			second_count,
-			minute_count,
-			hour_count
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (provider)
-		DO UPDATE SET
-			window_start = EXCLUDED.window_start,
-			window_seconds = EXCLUDED.window_seconds,
-			request_count = EXCLUDED.request_count,
-			second_bucket = EXCLUDED.second_bucket,
-			minute_bucket = EXCLUDED.minute_bucket,
-			hour_bucket = EXCLUDED.hour_bucket,
-			second_count = EXCLUDED.second_count,
-			minute_count = EXCLUDED.minute_count,
-			hour_count = EXCLUDED.hour_count,
-			updated_at = NOW()
-	`
-
-	_, err := r.db.Exec(ctx, q,
-		state.Provider,
-		state.WindowStart,
-		state.WindowSeconds,
-		state.RequestCount,
-		state.SecondBucket,
-		state.MinuteBucket,
-		state.HourBucket,
-		state.SecondCount,
-		state.MinuteCount,
-		state.HourCount,
-	)
-	if err != nil {
-		return fmt.Errorf("upsert rate limit state: %w", err)
-	}
-
-	return nil
-}
-
-func (r *PostgresRateLimitStateRepository) Get(ctx context.Context, provider string) (domain.RateLimitState, error) {
-	const q = `
-		SELECT
-			provider,
-			window_start,
-			window_seconds,
-			request_count,
-			second_bucket,
-			minute_bucket,
-			hour_bucket,
-			second_count,
-			minute_count,
-			hour_count,
-			updated_at
-		FROM rate_limit_state
-		WHERE provider = $1
-	`
-
-	row := r.db.QueryRow(ctx, q, provider)
-	return scanRateLimitState(row)
 }
 
 func scanFund(row interface{ Scan(dest ...any) error }) (domain.Fund, error) {
@@ -1113,27 +907,6 @@ func scanSyncFundStateView(row interface{ Scan(dest ...any) error }) (domain.Syn
 	if lastRunID.Valid {
 		value := lastRunID.Int64
 		out.LastRunID = &value
-	}
-
-	return out, nil
-}
-
-func scanRateLimitState(row interface{ Scan(dest ...any) error }) (domain.RateLimitState, error) {
-	var out domain.RateLimitState
-	if err := row.Scan(
-		&out.Provider,
-		&out.WindowStart,
-		&out.WindowSeconds,
-		&out.RequestCount,
-		&out.SecondBucket,
-		&out.MinuteBucket,
-		&out.HourBucket,
-		&out.SecondCount,
-		&out.MinuteCount,
-		&out.HourCount,
-		&out.UpdatedAt,
-	); err != nil {
-		return domain.RateLimitState{}, fmt.Errorf("scan rate limit state: %w", err)
 	}
 
 	return out, nil

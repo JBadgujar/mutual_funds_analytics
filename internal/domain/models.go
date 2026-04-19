@@ -119,17 +119,3 @@ type SyncFundStateView struct {
 	LastRunID     *int64
 	ConsecutiveOK int32
 }
-
-type RateLimitState struct {
-	Provider      string
-	WindowStart   time.Time
-	WindowSeconds int32
-	RequestCount  int32
-	SecondBucket  int64
-	MinuteBucket  int64
-	HourBucket    int64
-	SecondCount   int32
-	MinuteCount   int32
-	HourCount     int32
-	UpdatedAt     time.Time
-}
